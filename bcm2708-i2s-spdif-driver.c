@@ -1,6 +1,7 @@
 /*
  * SPDIF output driver using the I2C interface and software encoding
  * Copyright (C) 2015, 2023 Stephan "Kiffie" <kiffie.vanhaash@gmail.com>
+ * 2024 Matti Metsälä
  *
  * Based on
  *      ALSA SoC I2S Audio Layer for Broadcom BCM2708 SoC
@@ -231,7 +232,9 @@ static struct snd_pcm_hardware bcm2708_i2s_pcm_hw = {
                  SNDRV_PCM_INFO_INTERLEAVED |
                  SNDRV_PCM_INFO_BLOCK_TRANSFER),
         .formats          = SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S16_LE,
-        .rates            = SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_192000,
+        .rates            = SNDRV_PCM_RATE_44100  | SNDRV_PCM_RATE_48000 |
+                            SNDRV_PCM_RATE_88200  | SNDRV_PCM_RATE_96000 |
+                            SNDRV_PCM_RATE_176400 | SNDRV_PCM_RATE_192000,
         .rate_min         = 44100,
         .rate_max         = 192000,
         .channels_min     = 2,
@@ -301,8 +304,14 @@ static int bcm2708_pcm_prepare(struct snd_pcm_substream *ss)
 	case 48000:
 		ch_stat[3] = SPDIF_CS3_48000;
 		break;
+	case 88200:
+		ch_stat[3] = SPDIF_CS3_88200;
+		break;
 	case 96000:
 		ch_stat[3] = SPDIF_CS3_96000;
+		break;
+	case 176400:
+		ch_stat[3] = SPDIF_CS3_176400;
 		break;
 	case 192000:
 		ch_stat[3] = SPDIF_CS3_192000;
@@ -712,7 +721,7 @@ static int bcm2708_i2s_probe(struct platform_device *pdev)
 	/* clear TX FIFO */
 	regmap_update_bits(dev->i2s_regmap, BCM2708_I2S_CS_A_REG,
 			   BCM2708_I2S_TXCLR, BCM2708_I2S_TXCLR);
-	
+
 	/*
 	 * Toggle the SYNC flag. After 2 PCM clock cycles it can be read back
 	 * FIXME: This does not seem to work for slave mode!

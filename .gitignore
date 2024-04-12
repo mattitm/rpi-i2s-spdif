@@ -5,6 +5,7 @@
 modules.order
 Module.symvers
 .tmp_versions
+.*.cmd
 
 # Object files
 *.o
@@ -35,6 +36,7 @@ Module.symvers
 *.i*86
 *.x86_64
 *.hex
+*.mod
 
 # Debug files
 *.dSYM/
