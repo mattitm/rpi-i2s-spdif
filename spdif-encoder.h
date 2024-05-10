@@ -2,6 +2,7 @@
  * SPDIF encoder
  *
  * Copyright (C) 2015, 2023 Stephan "Kiffie" <kiffie.vanhaash@gmail.com>
+ * 2024 Matti Metsälä
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -110,8 +111,8 @@ static inline void spdif_encode_frame_s24le_packed(struct spdif_encoder *spdif,
                                                    const void *frame)
 {
 	const uint8_t *f = frame;
-	int left = (f[0]|(f[1]<<8)|(f[2]<<16)) << 4;
-	int right= (f[3]|(f[4]<<8)|(f[5]<<16)) << 4;
+	int left = ((uint32_t)f[0]|((uint32_t)f[1]<<8)|((uint32_t)f[2]<<16)) << 4;
+	int right= ((uint32_t)f[3]|((uint32_t)f[4]<<8)|((uint32_t)f[5]<<16)) << 4;
 	spdif_encode_frame_generic(spdif, encoded, left, right);
 }
 
