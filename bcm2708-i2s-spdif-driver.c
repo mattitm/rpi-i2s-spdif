@@ -175,8 +175,8 @@ if (debug & mask) \
 #define DBG_IRQ  0x2
 #define DBG_ALSA 0x4
 
-static unsigned int debug=DBG_INIT|DBG_IRQ|DBG_ALSA;
-/* static unsigned int debug= 0; */
+// static unsigned int debug=DBG_INIT|DBG_IRQ|DBG_ALSA;
+static unsigned int debug = 0;
 module_param(debug, int, 0644);
 MODULE_PARM_DESC(debug, "debug mask (0: no debug messages)");
 
@@ -187,6 +187,8 @@ MODULE_PARM_DESC(debug, "debug mask (0: no debug messages)");
 #define PCM_PERIODES			8
 /* PCM period size must be divisible by 192*4 (S16_LE), 192*6 (S24_3LE) and 192*8 (S24_LE) */
 #define PCM_BUFSIZE				(PCM_PERIODES*192*24)	/* PCM buffer size */
+
+typedef void (*spdif_encode_func)(struct spdif_encoder *, void *, const void *);
 
 struct bcm2708_i2s_dev {
 	spinlock_t lock;
@@ -213,6 +215,7 @@ struct bcm2708_i2s_dev {
 	struct snd_pcm_substream *ss; /* current substream or NULL */
 
 	int period_frames;
+	spdif_encode_func encode_frame;
 };
 
 static void bcm_2708_i2s_init_clock(struct bcm2708_i2s_dev *dev,
@@ -234,6 +237,7 @@ static struct snd_pcm_hardware bcm2708_i2s_pcm_hw = {
                             SNDRV_PCM_INFO_INTERLEAVED |
                             SNDRV_PCM_INFO_BLOCK_TRANSFER,
         .formats          = SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S24_3LE |
+                            SNDRV_PCM_FMTBIT_S32_LE |
                             SNDRV_PCM_FMTBIT_S16_LE,
         .rates            = SNDRV_PCM_RATE_44100  | SNDRV_PCM_RATE_48000 |
                             SNDRV_PCM_RATE_88200  | SNDRV_PCM_RATE_96000 |
@@ -287,8 +291,14 @@ static int bcm2708_hw_params(struct snd_pcm_substream *ss,
 	return res;
 }
 
+#define CASE_RATE(n) \
+	case n: \
+		ch_stat[3] = SPDIF_CS3_##n; \
+		break;
+
 static int bcm2708_pcm_prepare(struct snd_pcm_substream *ss)
 {
+	int bits = 0;
 	uint8_t ch_stat[] = { SPDIF_CS0_NOT_COPYRIGHT,
 			      SPDIF_CS1_DDCONV | SPDIF_CS1_ORIGINAL,
 			      0,
@@ -302,41 +312,41 @@ static int bcm2708_pcm_prepare(struct snd_pcm_substream *ss)
 	dprintk(DBG_ALSA, "rate                 : %d\n",  ss->runtime->rate);
 	dprintk(DBG_ALSA, "format               : %d\n",  ss->runtime->format);
 	switch (ss->runtime->rate) {
-	case 44100:
-		ch_stat[3] = SPDIF_CS3_44100;
-		break;
-	case 48000:
-		ch_stat[3] = SPDIF_CS3_48000;
-		break;
-	case 88200:
-		ch_stat[3] = SPDIF_CS3_88200;
-		break;
-	case 96000:
-		ch_stat[3] = SPDIF_CS3_96000;
-		break;
-	case 176400:
-		ch_stat[3] = SPDIF_CS3_176400;
-		break;
-	case 192000:
-		ch_stat[3] = SPDIF_CS3_192000;
-		break;
+	CASE_RATE(44100)
+	CASE_RATE(48000)
+	CASE_RATE(88200)
+	CASE_RATE(96000)
+	CASE_RATE(176400)
+	CASE_RATE(192000)
 	default:
 		dev_err(dev->dev, "prepare: invalid sampling rate: %u\n", ss->runtime->rate);
-
+		return -EINVAL;
 	}
 	switch (ss->runtime->format) {
 		case SNDRV_PCM_FORMAT_S24_LE:
+			bits = 24;
+			dev->encode_frame = spdif_encode_frame_s24le;
+			break;
 		case SNDRV_PCM_FORMAT_S24_3LE:
-			ch_stat[4] = SPDIF_CS4_MAX_WORDLEN_24 | SPDIF_CS4_WORDLEN_24_20;
+			bits = 24;
+			dev->encode_frame = spdif_encode_frame_s24le_packed;
 			break;
 		case SNDRV_PCM_FORMAT_S16_LE:
-			ch_stat[4] = SPDIF_CS4_WORDLEN_20_16;
+			bits = 16;
+			dev->encode_frame = spdif_encode_frame_s16le;
+			break;
+		case SNDRV_PCM_FORMAT_S32_LE:
+			bits = 32;
+			dev->encode_frame = spdif_encode_frame_s32le;
 			break;
 		default:
 			dev_err(dev->dev, "%s: invalid format: %u\n", __func__, ss->runtime->format);
+			return -EINVAL;
 	}
+	ch_stat[4] = (bits == 16) ? SPDIF_CS4_WORDLEN_20_16 : (SPDIF_CS4_MAX_WORDLEN_24 | SPDIF_CS4_WORDLEN_24_20);
 	spdif_encoder_set_channel_status(&dev->spdif, ch_stat, sizeof(ch_stat));
 	bcm_2708_i2s_init_clock(dev, 128 * ss->runtime->rate);
+	dev_info(dev->dev, "Prepare %u-bit %u Hz\n", bits, ss->runtime->rate);
 	return 0;
 }
 
@@ -350,12 +360,14 @@ static int bcm2708_pcm_trigger(struct snd_pcm_substream *ss, int cmd)
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 		dprintk(DBG_ALSA, "SNDRV_PCM_TRIGGER_START\n");
+		dev_info(dev->dev, "PCM start\n");
 		dev->pcm_pointer = 0;
 		dev->period_frames = 0;
 		bcm2708_i2s_dmaengine_prepare_and_submit(dev);
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 		dprintk(DBG_ALSA, "SNDRV_PCM_TRIGGER_STOP\n");
+		dev_info(dev->dev, "PCM stop\n");
 		dmaengine_terminate_all(dev->i2s_dma);
 		break;
 	default:
@@ -381,8 +393,6 @@ static struct snd_pcm_ops bcm2708_i2s_pcm_ops = {
         .pointer   = bcm2708_pcm_pointer,
 };
 
-typedef void (*spdif_encode_func)(struct spdif_encoder *, void *, const void *);
-
 /*
  * I2S interface
  */
@@ -395,24 +405,9 @@ static void bcm2708_i2s_dma_complete(void *arg)
 	uint8_t *src;
 	uint8_t *dst;
 	int i;
-	spdif_encode_func encode_frame;
 	ssize_t frame_bytes;
 
-	if( dev->ss ){
-		switch( dev->ss->runtime->format ){
-			case SNDRV_PCM_FORMAT_S24_LE:
-				encode_frame = spdif_encode_frame_s24le;
-				break;
-			case SNDRV_PCM_FORMAT_S24_3LE:
-				encode_frame = spdif_encode_frame_s24le_packed;
-				break;
-			case SNDRV_PCM_FORMAT_S16_LE:
-				encode_frame = spdif_encode_frame_s16le;
-				break;
-			default:
-				dev_err(dev->dev, "%s: invalid format: %u\n", __func__, dev->ss->runtime->format);
-				return;
-		}
+	if ( dev->ss && dev->encode_frame) {
 		frame_bytes = frames_to_bytes(dev->ss->runtime, 1);
 
 		dmaengine_tx_status(dev->i2s_dma, dev->i2s_dma_cookie, &state);
@@ -423,8 +418,8 @@ static void bcm2708_i2s_dma_complete(void *arg)
 		src= dev->ss->dma_buffer.area;
 		src+= frames_to_bytes(dev->ss->runtime, dev->pcm_pointer);
 		dst=  dev->spdif_buffer + offset;
-		for( i=0; i< SPDIF_BUFSIZE_FRAMES/2; i++ ){
-			encode_frame(&dev->spdif, dst, src);
+		for (i=0; i< SPDIF_BUFSIZE_FRAMES/2; i++) {
+			dev->encode_frame(&dev->spdif, dst, src);
 			src += frame_bytes;
 			dst += SPDIF_FRAMESIZE;
 		}
