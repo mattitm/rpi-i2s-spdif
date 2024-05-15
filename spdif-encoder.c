@@ -2,6 +2,7 @@
  * SPDIF encoder
  *
  * Copyright (C) 2015, 2023 Stephan "Kiffie" <kiffie.vanhaash@gmail.com>
+ * 2024 Matti Metsälä
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -125,15 +126,15 @@ void spdif_fast_encode(struct spdif_encoder *spdif,
 
 void spdif_encode_frame_generic(struct spdif_encoder *spdif,
 				void *encoded,
-				int left_shifted, int right_shifted)
+				uint32_t left_shifted, uint32_t right_shifted)
 {
-	uint8_t *p= encoded;
+	uint8_t *p = encoded;
 	uint32_t subframe;
-	subframe= spdif->frame_ctr == 0 ? SPDIF_PREAMBLE_Z : SPDIF_PREAMBLE_X;
-	subframe|= left_shifted;
+	subframe = spdif->frame_ctr == 0 ? SPDIF_PREAMBLE_Z : SPDIF_PREAMBLE_X;
+	subframe |= left_shifted & spdif->sample_mask;
 	spdif_fast_encode(spdif, p, subframe);
-	p+= SPDIF_FRAMESIZE/2;
-	subframe= SPDIF_PREAMBLE_Y | right_shifted;
+	p += SPDIF_FRAMESIZE/2;
+	subframe = SPDIF_PREAMBLE_Y | (right_shifted & spdif->sample_mask);
 	spdif_fast_encode(spdif, p, subframe);
 	if( ++spdif->frame_ctr >= SPDIF_BLOCKSIZE ){
 		spdif->frame_ctr= 0;
@@ -147,6 +148,7 @@ void spdif_encoder_init(struct spdif_encoder *spdif){
 		spdif->byte[i]= spdif_biphase_encode(0, i);
 	}
 	spdif_encoder_set_channel_status(spdif, NULL, 0);
+	spdif->sample_mask = SPDIF_SAMPLE_MASK;
 }
 
 void spdif_encoder_set_channel_status(struct spdif_encoder *spdif,
@@ -154,4 +156,9 @@ void spdif_encoder_set_channel_status(struct spdif_encoder *spdif,
 {
 	memset(spdif->channel_status, 0, SPDIF_CHSTATSIZE);
 	memcpy(spdif->channel_status, cs, len <= SPDIF_CHSTATSIZE ? len : SPDIF_CHSTATSIZE);
+}
+
+void spdif_encoder_set_sample_mask(struct spdif_encoder *spdif, uint32_t mask)
+{
+	spdif->sample_mask = mask & SPDIF_SAMPLE_MASK;
 }

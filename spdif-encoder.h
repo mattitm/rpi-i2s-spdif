@@ -31,6 +31,7 @@ typedef struct spdif_encoder {
 
 	uint8_t frame_ctr;
 	uint8_t channel_status[SPDIF_CHSTATSIZE];
+	uint32_t sample_mask;
 } spdif_encoder_t;
 
 typedef struct spdif_frame {
@@ -41,6 +42,7 @@ typedef struct spdif_frame {
 #define SPDIF_PREAMBLE_Y	0x01   /* channel B (right) */
 #define SPDIF_PREAMBLE_Z	0x02   /* channel A, start of block */
 #define SPDIF_PREAMBLE_MASK	0x0f
+#define SPDIF_SAMPLE_MASK	0x0ffffff0
 #define SPDIF_P_MASK            0x80000000  /* parity bit */
 #define SPDIF_C_MASK            0x40000000  /* channel status bit */
 #define SPDIF_U_MASK            0x20000000  /* user data bit */
@@ -91,49 +93,50 @@ typedef struct spdif_frame {
 void spdif_encoder_init(struct spdif_encoder *spdif);
 void spdif_encoder_set_channel_status(struct spdif_encoder *spdif,
                                       const void *cs, size_t len);
+void spdif_encoder_set_sample_mask(struct spdif_encoder *spdif, uint32_t mask);
 
 void spdif_encode_frame_generic(struct spdif_encoder *spdif,
 				void *encoded,
-				int left_shifted, int right_shifted);
+				uint32_t left_shifted, uint32_t right_shifted);
 
 static inline void spdif_encode_frame_s24le(struct spdif_encoder *spdif,
-			      void *encoded,
-			      const void *frame)
-{
-	const uint32_t *f= frame;
-	int left = (f[0] & 0x00ffffff)<<4;
-	int right= (f[1] & 0x00ffffff)<<4;
-	spdif_encode_frame_generic(spdif, encoded, left, right);
-}
-
-static inline void spdif_encode_frame_s24le_packed(struct spdif_encoder *spdif,
-                                                   void *encoded,
-                                                   const void *frame)
-{
-	const uint8_t *f = frame;
-	int left = ((uint32_t)f[0]|((uint32_t)f[1]<<8)|((uint32_t)f[2]<<16)) << 4;
-	int right= ((uint32_t)f[3]|((uint32_t)f[4]<<8)|((uint32_t)f[5]<<16)) << 4;
-	spdif_encode_frame_generic(spdif, encoded, left, right);
-}
-
-static inline void spdif_encode_frame_s16le(struct spdif_encoder *spdif,
-					    void *encoded,
-					    const void *frame)
-{
-	const uint16_t *f = frame;
-	int left = (f[0] & 0x0000ffff)<<12;
-	int right= (f[1] & 0x0000ffff)<<12;
-	spdif_encode_frame_generic(spdif, encoded, left, right);
-}
-
-static inline void spdif_encode_frame_s32le(struct spdif_encoder *spdif,
-			      void *encoded,
-			      const void *frame)
+				void *encoded,
+				const void *frame)
 {
 	const uint32_t *f = frame;
 	spdif_encode_frame_generic(spdif, encoded,
-		(f[0] & 0xffffff00) >> 4,
-		(f[1] & 0xffffff00) >> 4);
+		f[0] << 4,
+		f[1] << 4);
+}
+
+static inline void spdif_encode_frame_s24le_packed(struct spdif_encoder *spdif,
+				void *encoded,
+				const void *frame)
+{
+	const uint8_t *f = frame;
+	spdif_encode_frame_generic(spdif, encoded,
+		((uint32_t)f[0]|((uint32_t)f[1]<<8)|((uint32_t)f[2]<<16)) << 4,
+		((uint32_t)f[3]|((uint32_t)f[4]<<8)|((uint32_t)f[5]<<16)) << 4);
+}
+
+static inline void spdif_encode_frame_s16le(struct spdif_encoder *spdif,
+				void *encoded,
+				const void *frame)
+{
+	const uint16_t *f = frame;
+	spdif_encode_frame_generic(spdif, encoded,
+		(uint32_t)f[0] << 12,
+		(uint32_t)f[1] << 12);
+}
+
+static inline void spdif_encode_frame_s32le(struct spdif_encoder *spdif,
+				void *encoded,
+				const void *frame)
+{
+	const uint32_t *f = frame;
+	spdif_encode_frame_generic(spdif, encoded,
+		f[0] >> 4,
+		f[1] >> 4);
 }
 
 #endif

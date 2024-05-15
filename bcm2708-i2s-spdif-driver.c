@@ -236,9 +236,14 @@ static struct snd_pcm_hardware bcm2708_i2s_pcm_hw = {
         .info             = SNDRV_PCM_INFO_MMAP |
                             SNDRV_PCM_INFO_INTERLEAVED |
                             SNDRV_PCM_INFO_BLOCK_TRANSFER,
-        .formats          = SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S24_3LE |
-                            SNDRV_PCM_FMTBIT_S32_LE |
-                            SNDRV_PCM_FMTBIT_S16_LE,
+        .formats          = SNDRV_PCM_FMTBIT_S16_LE |
+                            SNDRV_PCM_FMTBIT_S20_LE | SNDRV_PCM_FMTBIT_S20_3LE |
+                            SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S24_3LE |
+                            SNDRV_PCM_FMTBIT_S32_LE,
+        // .subformats       = SNDRV_PCM_SUBFMTBIT_STD |
+        //                     SNDRV_PCM_SUBFMTBIT_MSBITS_MAX |
+        //                     SNDRV_PCM_SUBFMTBIT_MSBITS_20 |
+        //                     SNDRV_PCM_SUBFMTBIT_MSBITS_24,
         .rates            = SNDRV_PCM_RATE_44100  | SNDRV_PCM_RATE_48000 |
                             SNDRV_PCM_RATE_88200  | SNDRV_PCM_RATE_96000 |
                             SNDRV_PCM_RATE_176400 | SNDRV_PCM_RATE_192000,
@@ -275,13 +280,21 @@ static int bcm2708_pcm_close(struct snd_pcm_substream *ss)
 static int bcm2708_hw_params(struct snd_pcm_substream *ss,
 			     struct snd_pcm_hw_params *hw_params)
 {
-	struct bcm2708_i2s_dev *dev= ss->pcm->private_data;
+	struct bcm2708_i2s_dev *dev = ss->pcm->private_data;
+	uint32_t sample_mask = SPDIF_SAMPLE_MASK;
 	int buffer_bytes, res;
 	dprintk(DBG_ALSA, "hw_params start ss=%p, hw_params=%p\n", ss, hw_params);
-	buffer_bytes= params_buffer_bytes(hw_params);
+	dprintk(DBG_ALSA, "msbits: %u\n", hw_params->msbits);
+	if (hw_params->msbits < 24) {
+		sample_mask <<= (24 - hw_params->msbits);
+		sample_mask &= SPDIF_SAMPLE_MASK;
+	}
+	dev_info(dev->dev, "Sample mask: 0x%08x\n", sample_mask);
+	spdif_encoder_set_sample_mask(&dev->spdif, sample_mask);
+	buffer_bytes = params_buffer_bytes(hw_params);
 	dprintk(DBG_ALSA, "buffer size in frames: %d\n", params_buffer_size(hw_params) );
 	dprintk(DBG_ALSA, "buffer size in bytes: %d\n", buffer_bytes);
-	res= snd_pcm_lib_malloc_pages(ss, buffer_bytes);
+	res = snd_pcm_lib_malloc_pages(ss, buffer_bytes);
 	dprintk(DBG_ALSA, "snd_pcm_lib_malloc_pages: res=%d\n", res);
 	dprintk(DBG_INIT, "alsa buf. base/size = %p/%d, int. buf base = %p\n",
 		ss->runtime->dma_buffer_p->area,
@@ -298,7 +311,6 @@ static int bcm2708_hw_params(struct snd_pcm_substream *ss,
 
 static int bcm2708_pcm_prepare(struct snd_pcm_substream *ss)
 {
-	int bits = 0;
 	uint8_t ch_stat[] = { SPDIF_CS0_NOT_COPYRIGHT,
 			      SPDIF_CS1_DDCONV | SPDIF_CS1_ORIGINAL,
 			      0,
@@ -311,6 +323,8 @@ static int bcm2708_pcm_prepare(struct snd_pcm_substream *ss)
 	dprintk(DBG_ALSA, "number of periods    : %d\n",  ss->runtime->periods);
 	dprintk(DBG_ALSA, "rate                 : %d\n",  ss->runtime->rate);
 	dprintk(DBG_ALSA, "format               : %d\n",  ss->runtime->format);
+	dprintk(DBG_ALSA, "frame-bits           : %u\n",  ss->runtime->frame_bits);
+	dprintk(DBG_ALSA, "sample-bits          : %u\n",  ss->runtime->sample_bits);
 	switch (ss->runtime->rate) {
 	CASE_RATE(44100)
 	CASE_RATE(48000)
@@ -323,30 +337,39 @@ static int bcm2708_pcm_prepare(struct snd_pcm_substream *ss)
 		return -EINVAL;
 	}
 	switch (ss->runtime->format) {
-		case SNDRV_PCM_FORMAT_S24_LE:
-			bits = 24;
-			dev->encode_frame = spdif_encode_frame_s24le;
-			break;
-		case SNDRV_PCM_FORMAT_S24_3LE:
-			bits = 24;
-			dev->encode_frame = spdif_encode_frame_s24le_packed;
-			break;
 		case SNDRV_PCM_FORMAT_S16_LE:
-			bits = 16;
 			dev->encode_frame = spdif_encode_frame_s16le;
 			break;
+		case SNDRV_PCM_FORMAT_S20_LE:
+		case SNDRV_PCM_FORMAT_S24_LE:
+			dev->encode_frame = spdif_encode_frame_s24le;
+			break;
+		case SNDRV_PCM_FORMAT_S20_3LE:
+		case SNDRV_PCM_FORMAT_S24_3LE:
+			dev->encode_frame = spdif_encode_frame_s24le_packed;
+			break;
 		case SNDRV_PCM_FORMAT_S32_LE:
-			bits = 32;
 			dev->encode_frame = spdif_encode_frame_s32le;
 			break;
 		default:
 			dev_err(dev->dev, "%s: invalid format: %u\n", __func__, ss->runtime->format);
 			return -EINVAL;
 	}
-	ch_stat[4] = (bits == 16) ? SPDIF_CS4_WORDLEN_20_16 : (SPDIF_CS4_MAX_WORDLEN_24 | SPDIF_CS4_WORDLEN_24_20);
+	switch (ss->runtime->sample_bits) {
+		case 16:
+			ch_stat[4] = SPDIF_CS4_WORDLEN_20_16;
+			break;
+		case 20:
+			ch_stat[4] = SPDIF_CS4_WORDLEN_24_20;
+			break;
+		case 24:
+		case 32:
+			ch_stat[4] = SPDIF_CS4_MAX_WORDLEN_24 | SPDIF_CS4_WORDLEN_24_20;
+			break;
+	}
+	dev_info(dev->dev, "Prepare %u-bit %u Hz\n", ss->runtime->sample_bits, ss->runtime->rate);
 	spdif_encoder_set_channel_status(&dev->spdif, ch_stat, sizeof(ch_stat));
 	bcm_2708_i2s_init_clock(dev, 128 * ss->runtime->rate);
-	dev_info(dev->dev, "Prepare %u-bit %u Hz\n", bits, ss->runtime->rate);
 	return 0;
 }
 
