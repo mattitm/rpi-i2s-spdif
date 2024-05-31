@@ -216,6 +216,7 @@ struct bcm2708_i2s_dev {
 
 	int period_frames;
 	spdif_encode_func encode_frame;
+	atomic_t silence;
 };
 
 static void bcm_2708_i2s_init_clock(struct bcm2708_i2s_dev *dev,
@@ -258,22 +259,24 @@ static struct snd_pcm_hardware bcm2708_i2s_pcm_hw = {
         .periods_max      = PCM_PERIODES,
 };
 
+static int bcm2708_i2s_dmaengine_prepare_and_submit(struct bcm2708_i2s_dev *dev);
+
 static int bcm2708_pcm_open(struct snd_pcm_substream *ss)
 {
-	struct bcm2708_i2s_dev *dev= ss->pcm->private_data;
-	ss->private_data= dev;
+	struct bcm2708_i2s_dev *dev = ss->pcm->private_data;
+	ss->private_data = dev;
 	dprintk(DBG_ALSA, "dev=%p\n", dev);
-	ss->runtime->hw= bcm2708_i2s_pcm_hw;
+	ss->runtime->hw = bcm2708_i2s_pcm_hw;
 	dprintk(DBG_ALSA, "pcm_open\n");
-	dev->ss= ss;
+	dev->ss = ss;
 	return 0;
 }
 
 static int bcm2708_pcm_close(struct snd_pcm_substream *ss)
 {
-	struct bcm2708_i2s_dev *dev= ss->pcm->private_data;
-	ss->private_data= NULL;
-	dev->ss= NULL;
+	struct bcm2708_i2s_dev *dev = ss->pcm->private_data;
+	ss->private_data = NULL;
+	dev->ss = NULL;
 	return 0;
 }
 
@@ -311,6 +314,7 @@ static int bcm2708_hw_params(struct snd_pcm_substream *ss,
 
 static int bcm2708_pcm_prepare(struct snd_pcm_substream *ss)
 {
+	int silence;
 	uint8_t ch_stat[] = { SPDIF_CS0_NOT_COPYRIGHT,
 			      SPDIF_CS1_DDCONV | SPDIF_CS1_ORIGINAL,
 			      0,
@@ -367,31 +371,42 @@ static int bcm2708_pcm_prepare(struct snd_pcm_substream *ss)
 			ch_stat[4] = SPDIF_CS4_MAX_WORDLEN_24 | SPDIF_CS4_WORDLEN_24_20;
 			break;
 	}
-	dev_info(dev->dev, "Prepare %u-bit %u Hz\n", ss->runtime->sample_bits, ss->runtime->rate);
 	spdif_encoder_set_channel_status(&dev->spdif, ch_stat, sizeof(ch_stat));
 	bcm_2708_i2s_init_clock(dev, 128 * ss->runtime->rate);
+	silence = atomic_cmpxchg(&dev->silence, 0, 1);
+	if (silence != 0) {
+		dprintk(DBG_ALSA, "silence-count          : %d\n", silence);
+	} else {
+		dev_info(dev->dev, "Prepare %u-bit %u Hz\n", ss->runtime->sample_bits, ss->runtime->rate);
+	}
+	bcm2708_i2s_dmaengine_prepare_and_submit(dev);
 	return 0;
 }
-
-static int bcm2708_i2s_dmaengine_prepare_and_submit(struct bcm2708_i2s_dev *dev);
 
 static int bcm2708_pcm_trigger(struct snd_pcm_substream *ss, int cmd)
 {
 	struct bcm2708_i2s_dev *dev = snd_pcm_substream_chip(ss);
 	int ret = 0;
+	int silence;
 
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 		dprintk(DBG_ALSA, "SNDRV_PCM_TRIGGER_START\n");
-		dev_info(dev->dev, "PCM start\n");
 		dev->pcm_pointer = 0;
 		dev->period_frames = 0;
+		silence = atomic_xchg(&dev->silence, 0);
+		if (silence > 1) {
+			dev_info(dev->dev, "Start: %d frames silenced\n", (silence+1) * SPDIF_BUFSIZE_FRAMES/2);
+		} else {
+			dev_info(dev->dev, "Start\n");
+		}
 		bcm2708_i2s_dmaengine_prepare_and_submit(dev);
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 		dprintk(DBG_ALSA, "SNDRV_PCM_TRIGGER_STOP\n");
-		dev_info(dev->dev, "PCM stop\n");
+		dev_info(dev->dev, "Stop\n");
 		dmaengine_terminate_all(dev->i2s_dma);
+		dev->i2s_dma_cookie = 0;
 		break;
 	default:
 		ret = -EINVAL;
@@ -425,30 +440,36 @@ static void bcm2708_i2s_dma_complete(void *arg)
 	struct bcm2708_i2s_dev *dev = arg;
 	struct dma_tx_state state;
 	int offset;
-	uint8_t *src;
 	uint8_t *dst;
 	int i;
-	ssize_t frame_bytes;
 
-	if ( dev->ss && dev->encode_frame) {
-		frame_bytes = frames_to_bytes(dev->ss->runtime, 1);
+	if (!dev->encode_frame) {
+		return;
+	}
+	dmaengine_tx_status(dev->i2s_dma, dev->i2s_dma_cookie, &state);
 
-		dmaengine_tx_status(dev->i2s_dma, dev->i2s_dma_cookie, &state);
+	/* index of part of double buffer to fill */
+	offset = state.residue <= SPDIF_BUFSIZE/2 ? 0 : SPDIF_BUFSIZE/2;
+	dst = dev->spdif_buffer + offset;
 
-		/* index of part of double buffer to fill */
-		offset= state.residue <= SPDIF_BUFSIZE/2 ? 0 : SPDIF_BUFSIZE/2;
-
-		src= dev->ss->dma_buffer.area;
-		src+= frames_to_bytes(dev->ss->runtime, dev->pcm_pointer);
-		dst=  dev->spdif_buffer + offset;
-		for (i=0; i< SPDIF_BUFSIZE_FRAMES/2; i++) {
+	if (atomic_inc_not_zero(&dev->silence)) {
+		const uint32_t zero[2] = {0, 0};
+		for (i = 0; i < SPDIF_BUFSIZE_FRAMES/2; i++) {
+			dev->encode_frame(&dev->spdif, dst, zero);
+			dst += SPDIF_FRAMESIZE;
+		}
+	} else if (dev->ss) {
+		ssize_t frame_bytes = frames_to_bytes(dev->ss->runtime, 1);
+		uint8_t *src = dev->ss->dma_buffer.area;
+		src += frames_to_bytes(dev->ss->runtime, dev->pcm_pointer);
+		for (i =0 ; i < SPDIF_BUFSIZE_FRAMES/2; i++) {
 			dev->encode_frame(&dev->spdif, dst, src);
 			src += frame_bytes;
 			dst += SPDIF_FRAMESIZE;
 		}
-		dev->pcm_pointer+= SPDIF_BUFSIZE_FRAMES/2;
+		dev->pcm_pointer += SPDIF_BUFSIZE_FRAMES/2;
 		if( dev->pcm_pointer >= dev->ss->runtime->buffer_size ){
-			dev->pcm_pointer-= dev->ss->runtime->buffer_size;
+			dev->pcm_pointer -= dev->ss->runtime->buffer_size;
 		}
 
 		dev->period_frames += SPDIF_BUFSIZE_FRAMES/2;
@@ -462,6 +483,18 @@ static void bcm2708_i2s_dma_complete(void *arg)
 static int bcm2708_i2s_dmaengine_prepare_and_submit(struct bcm2708_i2s_dev *dev)
 {
 	struct dma_async_tx_descriptor *desc;
+
+	if (dev->i2s_dma_cookie > 0) {
+		return 0;
+	} else if (dev->encode_frame) {
+		// Fill with silence
+		const uint32_t zero[2] = {0, 0};
+		uint8_t* dst = dev->spdif_buffer;
+		for (int i = 0; i < SPDIF_BUFSIZE_FRAMES; i++) {
+			dev->encode_frame(&dev->spdif, dst, zero);
+			dst += SPDIF_FRAMESIZE;
+		}
+	}
 
 	desc = dmaengine_prep_dma_cyclic(dev->i2s_dma,
 			dev->spdif_buffer_handle,
