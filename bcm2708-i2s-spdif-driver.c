@@ -182,11 +182,12 @@ MODULE_PARM_DESC(debug, "debug mask (0: no debug messages)");
 
 /* General device struct */
 
-#define SPDIF_BUFSIZE_FRAMES	(2*192)	/* buffer size in SPDIF frames */
-#define SPDIF_BUFSIZE			(SPDIF_BUFSIZE_FRAMES*SPDIF_FRAMESIZE)
+#define SPDIF_BUFSIZE_FRAMES	(2 * SPDIF_BLOCKSIZE)	/* buffer size in SPDIF frames */
+#define SPDIF_BUFSIZE			(SPDIF_BUFSIZE_FRAMES * SPDIF_FRAMESIZE)
 #define PCM_PERIODES			8
 /* PCM period size must be divisible by 192*4 (S16_LE), 192*6 (S24_3LE) and 192*8 (S24_LE) */
-#define PCM_BUFSIZE				(PCM_PERIODES*192*24)	/* PCM buffer size */
+#define PCM_PERIOD_SIZE			(SPDIF_BLOCKSIZE * 24)
+#define PCM_BUFSIZE				(PCM_PERIODES * PCM_PERIOD_SIZE)	/* PCM buffer size */
 
 typedef void (*spdif_encode_func)(struct spdif_encoder *, void *, const void *);
 
@@ -253,8 +254,8 @@ static struct snd_pcm_hardware bcm2708_i2s_pcm_hw = {
         .channels_min     = 2,
         .channels_max     = 2,
         .buffer_bytes_max = PCM_BUFSIZE,
-        .period_bytes_min = PCM_BUFSIZE/PCM_PERIODES,
-        .period_bytes_max = PCM_BUFSIZE/PCM_PERIODES,
+        .period_bytes_min = PCM_PERIOD_SIZE,
+        .period_bytes_max = PCM_PERIOD_SIZE,
         .periods_min      = PCM_PERIODES,
         .periods_max      = PCM_PERIODES,
 };
@@ -396,7 +397,7 @@ static int bcm2708_pcm_trigger(struct snd_pcm_substream *ss, int cmd)
 		dev->period_frames = 0;
 		silence = atomic_xchg(&dev->silence, 0);
 		if (silence > 1) {
-			dev_info(dev->dev, "Start: %d frames silenced\n", (silence+1) * SPDIF_BUFSIZE_FRAMES/2);
+			dev_info(dev->dev, "Start: %d frames silenced\n", (silence + 1) * SPDIF_BUFSIZE_FRAMES / 2);
 		} else {
 			dev_info(dev->dev, "Start\n");
 		}
@@ -449,32 +450,37 @@ static void bcm2708_i2s_dma_complete(void *arg)
 	dmaengine_tx_status(dev->i2s_dma, dev->i2s_dma_cookie, &state);
 
 	/* index of part of double buffer to fill */
-	offset = state.residue <= SPDIF_BUFSIZE/2 ? 0 : SPDIF_BUFSIZE/2;
+	offset = state.residue <= SPDIF_BUFSIZE / 2 ? 0 : SPDIF_BUFSIZE / 2;
 	dst = dev->spdif_buffer + offset;
 
 	if (atomic_inc_not_zero(&dev->silence)) {
 		const uint32_t zero[2] = {0, 0};
-		for (i = 0; i < SPDIF_BUFSIZE_FRAMES/2; i++) {
+		for (i = 0; i < SPDIF_BUFSIZE_FRAMES / 2; i++) {
 			dev->encode_frame(&dev->spdif, dst, zero);
 			dst += SPDIF_FRAMESIZE;
 		}
 	} else if (dev->ss) {
 		ssize_t frame_bytes = frames_to_bytes(dev->ss->runtime, 1);
 		uint8_t *src = dev->ss->dma_buffer.area;
+		bool period_elapsed = false;
+
 		src += frames_to_bytes(dev->ss->runtime, dev->pcm_pointer);
-		for (i =0 ; i < SPDIF_BUFSIZE_FRAMES/2; i++) {
+		for (i =0 ; i < SPDIF_BUFSIZE_FRAMES / 2; i++) {
 			dev->encode_frame(&dev->spdif, dst, src);
 			src += frame_bytes;
 			dst += SPDIF_FRAMESIZE;
 		}
-		dev->pcm_pointer += SPDIF_BUFSIZE_FRAMES/2;
+		dev->pcm_pointer += SPDIF_BUFSIZE_FRAMES / 2;
 		if( dev->pcm_pointer >= dev->ss->runtime->buffer_size ){
 			dev->pcm_pointer -= dev->ss->runtime->buffer_size;
 		}
 
-		dev->period_frames += SPDIF_BUFSIZE_FRAMES/2;
-		if (dev->period_frames >= dev->ss->runtime->period_size) {
+		dev->period_frames += SPDIF_BUFSIZE_FRAMES / 2;
+		while (dev->period_frames >= dev->ss->runtime->period_size) {
 			dev->period_frames -= dev->ss->runtime->period_size;
+			period_elapsed = true;
+		}
+		if (period_elapsed) {
 			snd_pcm_period_elapsed(dev->ss);
 		}
 	}
@@ -499,7 +505,7 @@ static int bcm2708_i2s_dmaengine_prepare_and_submit(struct bcm2708_i2s_dev *dev)
 	desc = dmaengine_prep_dma_cyclic(dev->i2s_dma,
 			dev->spdif_buffer_handle,
 			SPDIF_BUFSIZE,
-			SPDIF_BUFSIZE/2,
+			SPDIF_BUFSIZE / 2,
 			DMA_MEM_TO_DEV,
 			DMA_CTRL_ACK|DMA_PREP_INTERRUPT);
 
@@ -751,7 +757,7 @@ out_card_create:
 	snd_card_free(dev->card);
 out_dma_alloc:
 	dma_free_coherent(dev->dev,
-			  SPDIF_FRAMESIZE*SPDIF_BUFSIZE_FRAMES,
+			  SPDIF_FRAMESIZE * SPDIF_BUFSIZE_FRAMES,
 			  dev->spdif_buffer,
 			  dev->spdif_buffer_handle);
 out_devm_kzalloc:
@@ -768,7 +774,7 @@ static int bcm2708_i2s_remove(struct platform_device *pdev)
 	dma_release_channel(dev->i2s_dma);
 	snd_card_free(dev->card);
 	dma_free_coherent(dev->dev,
-			  SPDIF_FRAMESIZE*SPDIF_BUFSIZE_FRAMES,
+			  SPDIF_FRAMESIZE * SPDIF_BUFSIZE_FRAMES,
 			  dev->spdif_buffer,
 			  dev->spdif_buffer_handle);
 	devm_kfree(&pdev->dev, dev);

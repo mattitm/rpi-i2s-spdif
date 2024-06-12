@@ -34,10 +34,6 @@ typedef struct spdif_encoder {
 	uint32_t sample_mask;
 } spdif_encoder_t;
 
-typedef struct spdif_frame {
-    uint32_t data[SPDIF_FRAMESIZE/sizeof(uint32_t)];
-} spdif_frame_t;
-
 #define SPDIF_PREAMBLE_X	0x00   /* channel A (left) */
 #define SPDIF_PREAMBLE_Y	0x01   /* channel B (right) */
 #define SPDIF_PREAMBLE_Z	0x02   /* channel A, start of block */
